@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "declaration": false,
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "outDir": "./com.chuckconway.pedal-scroll.sdPlugin/bin"
+  },
+  "include": ["src/**/*.ts"]
+}
