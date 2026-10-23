@@ -70,6 +70,16 @@ check(parse(1, [1, 0, 3, 0, 0, 1, 0]) == PedalState(middle: true), "parses M at 
 check(parse(2, [1, 0, 3, 0, 1, 0, 1, 0]) == nil, "rejects other report IDs")
 check(parse(1, [1, 0, 3, 0, 1, 0]) == nil, "rejects short reports")
 
+// Status priority
+func status(im: Bool = false, conn: Bool = true, post: Bool = true, on: Bool = true) -> AppStatus {
+    AppStatus(inputMonitoringDenied: im, pedalConnected: conn, canPostEvents: post, enabled: on)
+}
+check(status() == .active, "all good -> active")
+check(status(on: false) == .disabled, "disabled")
+check(status(post: false, on: false) == .needsAccessibility, "accessibility outranks disabled")
+check(status(conn: false, post: false) == .notConnected, "not connected outranks accessibility")
+check(status(im: true, conn: false) == .needsInputMonitoring, "input monitoring outranks everything")
+
 if failures == 0 {
     print("All tests passed")
 } else {

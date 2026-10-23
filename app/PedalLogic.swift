@@ -58,3 +58,26 @@ struct PedalTracker {
         direction = 0
     }
 }
+
+/// What the menu bar shows, highest-priority problem first.
+enum AppStatus: Equatable {
+    case needsInputMonitoring  // Can't read HID, so connection state is unknown.
+    case notConnected
+    case needsAccessibility    // Pedal reads fine, but scroll events would be dropped.
+    case disabled
+    case active
+
+    init(inputMonitoringDenied: Bool, pedalConnected: Bool, canPostEvents: Bool, enabled: Bool) {
+        if inputMonitoringDenied {
+            self = .needsInputMonitoring
+        } else if !pedalConnected {
+            self = .notConnected
+        } else if !canPostEvents {
+            self = .needsAccessibility
+        } else if !enabled {
+            self = .disabled
+        } else {
+            self = .active
+        }
+    }
+}
