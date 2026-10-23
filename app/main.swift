@@ -6,6 +6,9 @@ import IOKit
 import IOKit.hid
 import CoreGraphics
 import ServiceManagement
+import os
+
+let log = Logger(subsystem: "com.chuckconway.pedal-scroll", category: "hid")
 
 // MARK: - Configuration
 
@@ -28,7 +31,7 @@ let defaults = UserDefaults.standard
 let kSpeedIndexKey = "speedIndex"
 let kEnabledKey = "enabled"
 
-// MARK: - Globals (mirrors the proven CLI structure exactly)
+// MARK: - Globals (main thread only)
 
 var currentSpeedIndex: Int = {
     let stored = defaults.object(forKey: kSpeedIndexKey) as? Int ?? 1
@@ -44,9 +47,7 @@ var scrollTimer: DispatchSourceTimer?
 var scrollDirection: Int32 = 0
 let scrollQueue = DispatchQueue(label: "pedal.scroll.timer")
 
-var lastLeftPressed = false
-var lastMiddlePressed = false
-var lastRightPressed = false
+var pedalTracker = PedalTracker()
 
 var pedalConnected = false
 
@@ -62,10 +63,11 @@ func scrollStart(direction: Int32) {
     scrollStop()
     scrollDirection = direction
     let speed = speeds[currentSpeedIndex]
+    // Captured by value: the handler runs on scrollQueue and must not read main-thread globals.
+    let delta = speed.delta * direction
     let timer = DispatchSource.makeTimerSource(queue: scrollQueue)
     timer.schedule(deadline: .now(), repeating: speed.interval)
     timer.setEventHandler {
-        let delta = speed.delta * scrollDirection
         guard let event = CGEvent(scrollWheelEvent2Source: nil,
                                   units: .pixel,
                                   wheelCount: 1,
@@ -104,80 +106,51 @@ func setSpeed(index: Int) {
 func setEnabled(_ value: Bool) {
     enabled = value
     defaults.set(enabled, forKey: kEnabledKey)
-    if !enabled { scrollStop() }
+    // Re-enabling while a pedal is held resumes scrolling.
+    applyScrollDirection(enabled ? pedalTracker.direction : 0)
 }
 
-// MARK: - HID callbacks (free functions, exactly like the CLI binary)
-
-// Append-only debug log — surfaces what the app is actually doing.
-let debugLogPath = "/tmp/pedalscroll-app.log"
-func dbg(_ message: String) {
-    let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(message)\n"
-    if let data = line.data(using: .utf8) {
-        if let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: debugLogPath)) {
-            handle.seekToEndOfFile()
-            handle.write(data)
-            handle.closeFile()
-        } else {
-            try? data.write(to: URL(fileURLWithPath: debugLogPath))
-        }
+/// Starts, stops, or reverses the scroll timer to match `direction`.
+func applyScrollDirection(_ direction: Int32) {
+    guard direction != scrollDirection else { return }
+    if direction == 0 {
+        scrollStop()
+    } else {
+        scrollStart(direction: direction)
     }
 }
+
+// MARK: - HID callbacks (run on the main run loop)
 
 let inputReportCallback: IOHIDReportCallback = { _, _, _, _, reportID, report, reportLength in
-    dbg("HID callback: reportID=\(reportID) length=\(reportLength)")
-    guard reportID == 0x01, reportLength >= 7 else {
-        dbg("  rejected: reportID/length mismatch")
+    let buf = UnsafeBufferPointer(start: report, count: reportLength)
+    guard let state = PedalState(reportID: reportID, bytes: buf) else {
+        log.debug("Ignored report id=\(reportID) length=\(reportLength)")
         return
     }
-    let buf = UnsafeBufferPointer(start: report, count: reportLength)
-    let bytes = (0..<reportLength).map { String(format: "%02x", buf[$0]) }.joined(separator: " ")
-    dbg("  bytes: \(bytes)")
-    let leftPressed   = buf[4] != 0
-    let middlePressed = buf[5] != 0
-    let rightPressed  = buf[6] != 0
-    dbg("  L=\(leftPressed) M=\(middlePressed) R=\(rightPressed)")
+    log.debug("Pedals L=\(state.left) M=\(state.middle) R=\(state.right)")
 
-    if leftPressed != lastLeftPressed {
-        if leftPressed {
-            scrollStart(direction: 1)
-        } else if !rightPressed {
-            scrollStop()
-        }
-        lastLeftPressed = leftPressed
-    }
+    let middleTapped = pedalTracker.update(state)
+    applyScrollDirection(pedalTracker.direction)
 
-    if rightPressed != lastRightPressed {
-        if rightPressed {
-            scrollStart(direction: -1)
-        } else if !leftPressed {
-            scrollStop()
+    if middleTapped {
+        cycleSpeed()
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .pedalSpeedChanged, object: nil)
         }
-        lastRightPressed = rightPressed
-    }
-
-    if middlePressed != lastMiddlePressed {
-        if middlePressed {
-            cycleSpeed()
-            DispatchQueue.main.async {
-                NotificationCenter.default.post(name: .pedalSpeedChanged, object: nil)
-            }
-        }
-        lastMiddlePressed = middlePressed
     }
 }
 
 let deviceMatchingCallback: IOHIDDeviceCallback = { _, _, _, device in
-    dbg("Device matched, registering callback and opening")
+    log.info("Pedal matched")
     IOHIDDeviceRegisterInputReportCallback(device,
                                            hidReportBuffer,
                                            hidReportBufferSize,
                                            inputReportCallback,
                                            nil)
     let openResult = IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone))
-    dbg("IOHIDDeviceOpen result: 0x\(String(format: "%08x", openResult))")
     if openResult != kIOReturnSuccess {
-        NSLog("Pedal Scroll: IOHIDDeviceOpen failed: 0x%08x", openResult)
+        log.error("IOHIDDeviceOpen failed: \(String(format: "0x%08x", openResult), privacy: .public)")
     }
     pedalConnected = true
     DispatchQueue.main.async {
@@ -187,9 +160,7 @@ let deviceMatchingCallback: IOHIDDeviceCallback = { _, _, _, device in
 
 let deviceRemovalCallback: IOHIDDeviceCallback = { _, _, _, _ in
     scrollStop()
-    lastLeftPressed = false
-    lastMiddlePressed = false
-    lastRightPressed = false
+    pedalTracker.reset()
     pedalConnected = false
     DispatchQueue.main.async {
         NotificationCenter.default.post(name: .pedalConnectionChanged, object: nil)
@@ -197,7 +168,6 @@ let deviceRemovalCallback: IOHIDDeviceCallback = { _, _, _, _ in
 }
 
 func startHIDManager() {
-    dbg("=== App starting HID manager ===")
     hidManager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
     hidReportBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: hidReportBufferSize)
     hidReportBuffer.initialize(repeating: 0, count: hidReportBufferSize)
@@ -212,9 +182,8 @@ func startHIDManager() {
     IOHIDManagerScheduleWithRunLoop(hidManager, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
 
     let result = IOHIDManagerOpen(hidManager, IOOptionBits(kIOHIDOptionsTypeNone))
-    dbg("IOHIDManagerOpen result: 0x\(String(format: "%08x", result))")
     if result != kIOReturnSuccess {
-        NSLog("Pedal Scroll: IOHIDManagerOpen failed (0x%08x). Grant Input Monitoring permission.", result)
+        log.error("IOHIDManagerOpen failed: \(String(format: "0x%08x", result), privacy: .public)")
     }
 }
 

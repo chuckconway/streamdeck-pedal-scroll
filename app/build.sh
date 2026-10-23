@@ -23,7 +23,7 @@ rm -rf "$BUILD_DIR"
 mkdir -p "$MACOS" "$RESOURCES"
 
 echo "→ Compiling Swift"
-swiftc main.swift \
+swiftc main.swift PedalLogic.swift \
     -o "$MACOS/$EXECUTABLE_NAME" \
     -framework Cocoa \
     -framework IOKit \
