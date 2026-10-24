@@ -1,22 +1,16 @@
 // Renders the app icon. Usage: AppIcon <output.iconset> [logo.png]
 // build.sh compiles and runs this, then packs the iconset with iconutil.
 //
-// Same language as the menu bar glyph: the pedal's three plates, marked
-// ▲ / speed dots / ▼, with the left plate pressed.
+// Same language as the menu bar glyph: the Stream Deck Pedal seen from above —
+// a dark slab with a narrow ▲ strip, a wide center pad (speed dots) and a
+// narrow ▼ strip. The left strip is pressed and lit.
 
 import AppKit
 
 struct Palette {
     var backgroundTop: NSColor
     var backgroundBottom: NSColor
-    var plateTop: NSColor
-    var plateBottom: NSColor
-    var plateEdge: NSColor
-    var mark: NSColor
-    var pressedTop: NSColor
-    var pressedBottom: NSColor
-    var pressedMark: NSColor
-    var housing: NSColor
+    var accent: NSColor
 }
 
 func rgb(_ hex: UInt32, _ alpha: CGFloat = 1) -> NSColor {
@@ -26,12 +20,15 @@ func rgb(_ hex: UInt32, _ alpha: CGFloat = 1) -> NSColor {
             alpha: alpha)
 }
 
-let graphite = Palette(
-    backgroundTop: rgb(0x3A3F4B), backgroundBottom: rgb(0x16181D),
-    plateTop: rgb(0xFAFAFC), plateBottom: rgb(0xD9DCE3), plateEdge: rgb(0x9AA0AD),
-    mark: rgb(0x2A2E37),
-    pressedTop: rgb(0x5EF2D2), pressedBottom: rgb(0x16B89A), pressedMark: rgb(0x0B3D35),
-    housing: rgb(0x2B2F38))
+// Light "studio" tile so the black pedal reads like its product photo; teal is the only color.
+let studio = Palette(backgroundTop: rgb(0xF6F7F9), backgroundBottom: rgb(0xCDD2DA), accent: rgb(0x2EE6C0))
+
+// Device colors (the pedal is black rubber).
+let surfaceTop = rgb(0x2C2F36)
+let surfaceBottom = rgb(0x17191D)
+let frontFace = rgb(0x0B0C0E)
+let grooveColor = rgb(0x050506)
+let markColor = rgb(0x6B7280)
 
 /// Draws the icon into a `side`×`side` canvas (macOS grid: 824pt squircle in 1024).
 func drawIcon(side: CGFloat, palette p: Palette) {
@@ -51,62 +48,58 @@ func drawIcon(side: CGFloat, palette p: Palette) {
     ctx.saveGState()
     tilePath.addClip()
 
-    // Plates: left (pressed), middle, right. Middle is a touch wider, like the hardware.
-    let plateW: CGFloat = 176 * s
-    let middleW: CGFloat = 196 * s
-    let gap: CGFloat = 40 * s
-    let plateH: CGFloat = 470 * s
-    let baseY: CGFloat = 280 * s
-    let totalW = plateW * 2 + middleW + gap * 2
-    let x0 = (side - totalW) / 2
-    let radius: CGFloat = 52 * s
-    let press: CGFloat = 70 * s
-    let depth: CGFloat = 26 * s
+    // The slab: top face plus a front face below it for thickness.
+    let top = NSRect(x: 182 * s, y: 330 * s, width: 660 * s, height: 470 * s)
+    let thickness: CGFloat = 58 * s
+    let radius: CGFloat = 92 * s
+    let topPath = NSBezierPath(roundedRect: top, xRadius: radius, yRadius: radius)
+    let body = NSBezierPath(roundedRect: NSRect(x: top.minX, y: top.minY - thickness, width: top.width, height: top.height),
+                            xRadius: radius, yRadius: radius)
 
-    let rects = [
-        NSRect(x: x0, y: baseY, width: plateW, height: plateH - press),
-        NSRect(x: x0 + plateW + gap, y: baseY, width: middleW, height: plateH),
-        NSRect(x: x0 + plateW + gap + middleW + gap, y: baseY, width: plateW, height: plateH),
-    ]
+    ctx.saveGState()
+    ctx.setShadow(offset: CGSize(width: 0, height: -26 * s), blur: 60 * s, color: NSColor(white: 0, alpha: 0.45).cgColor)
+    frontFace.setFill()
+    body.fill()
+    ctx.restoreGState()
+    NSGradient(starting: surfaceTop, ending: surfaceBottom)!.draw(in: topPath, angle: -90)
 
-    // Housing the plates sit in.
-    let housing = NSRect(x: x0 - 34 * s, y: baseY - 62 * s, width: totalW + 68 * s, height: 110 * s)
-    p.housing.setFill()
-    NSBezierPath(roundedRect: housing, xRadius: 46 * s, yRadius: 46 * s).fill()
+    // Zones and grooves.
+    let sideW: CGFloat = 158 * s
+    let groove: CGFloat = 16 * s
+    let left = NSRect(x: top.minX, y: top.minY, width: sideW, height: top.height)
+    let right = NSRect(x: top.maxX - sideW, y: top.minY, width: sideW, height: top.height)
+    let center = NSRect(x: left.maxX + groove, y: top.minY, width: right.minX - left.maxX - groove * 2, height: top.height)
 
-    for (i, r) in rects.enumerated() {
-        let pressed = i == 0
-        // Side wall for depth (pressed plate sits lower, so less wall shows).
-        let wall = r.offsetBy(dx: 0, dy: -(pressed ? depth * 0.4 : depth))
-        (pressed ? p.pressedBottom.blended(withFraction: 0.35, of: .black)! : p.plateEdge).setFill()
-        NSBezierPath(roundedRect: wall, xRadius: radius, yRadius: radius).fill()
+    ctx.saveGState()
+    topPath.addClip()
+    // Pressed left strip: lit from within.
+    NSGradient(starting: p.accent.withAlphaComponent(0.30), ending: p.accent.withAlphaComponent(0.08))!
+        .draw(in: left, angle: -90)
+    grooveColor.setFill()
+    NSRect(x: left.maxX, y: top.minY - thickness, width: groove, height: top.height + thickness).fill()
+    NSRect(x: right.minX - groove, y: top.minY - thickness, width: groove, height: top.height + thickness).fill()
+    // Soft top-edge highlight.
+    NSGradient(starting: NSColor(white: 1, alpha: 0.10), ending: NSColor(white: 1, alpha: 0))!
+        .draw(in: NSRect(x: top.minX, y: top.maxY - 60 * s, width: top.width, height: 60 * s), angle: -90)
+    ctx.restoreGState()
 
-        let face = NSBezierPath(roundedRect: r, xRadius: radius, yRadius: radius)
-        if pressed {
-            ctx.saveGState()
-            ctx.setShadow(offset: .zero, blur: 60 * s, color: p.pressedTop.withAlphaComponent(0.55).cgColor)
-            p.pressedBottom.setFill()
-            face.fill()
-            ctx.restoreGState()
-            NSGradient(starting: p.pressedTop, ending: p.pressedBottom)!.draw(in: face, angle: -90)
-        } else {
-            NSGradient(starting: p.plateTop, ending: p.plateBottom)!.draw(in: face, angle: -90)
-        }
+    // Marks.
+    ctx.saveGState()
+    ctx.setShadow(offset: .zero, blur: 36 * s, color: p.accent.withAlphaComponent(0.9).cgColor)
+    p.accent.set()
+    chevron(in: left, up: true, s: s)
+    ctx.restoreGState()
 
-        let markColor = pressed ? p.pressedMark : p.mark
-        markColor.set()
-        switch i {
-        case 0: chevron(in: r, up: true, s: s)
-        case 1: dots(in: r, s: s)
-        default: chevron(in: r, up: false, s: s)
-        }
-    }
+    markColor.set()
+    chevron(in: right, up: false, s: s)
+    dots(in: center, s: s)
+
     ctx.restoreGState()
 }
 
 func chevron(in r: NSRect, up: Bool, s: CGFloat) {
-    let w: CGFloat = 92 * s
-    let h: CGFloat = 50 * s
+    let w: CGFloat = 78 * s
+    let h: CGFloat = 42 * s
     let cy = r.midY
     let tip = up ? cy + h / 2 : cy - h / 2
     let base = up ? cy - h / 2 : cy + h / 2
@@ -114,17 +107,17 @@ func chevron(in r: NSRect, up: Bool, s: CGFloat) {
     path.move(to: NSPoint(x: r.midX - w / 2, y: base))
     path.line(to: NSPoint(x: r.midX, y: tip))
     path.line(to: NSPoint(x: r.midX + w / 2, y: base))
-    path.lineWidth = 30 * s
+    path.lineWidth = 26 * s
     path.lineCapStyle = .round
     path.lineJoinStyle = .round
     path.stroke()
 }
 
 func dots(in r: NSRect, s: CGFloat) {
-    let d: CGFloat = 34 * s
-    let spacing: CGFloat = 70 * s
+    let d: CGFloat = 32 * s
+    let spacing: CGFloat = 64 * s
     for i in -1...1 {
-        let c = NSPoint(x: r.midX, y: r.midY + CGFloat(i) * spacing)
+        let c = NSPoint(x: r.midX + CGFloat(i) * spacing, y: r.midY)
         NSBezierPath(ovalIn: NSRect(x: c.x - d / 2, y: c.y - d / 2, width: d, height: d)).fill()
     }
 }
@@ -146,7 +139,7 @@ guard args.count >= 2 else {
     exit(2)
 }
 let out = URL(fileURLWithPath: args[1])
-let palette = graphite
+let palette = studio
 if args.count >= 3 {
     writePNG(side: 512, palette: palette, to: URL(fileURLWithPath: args[2]))
 }
