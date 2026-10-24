@@ -1,4 +1,2 @@
-node_modules/
-*.js.map
 .DS_Store
-com.chuckconway.pedal-scroll.sdPlugin/bin/
+app/build/
