@@ -111,6 +111,13 @@ check(StatusCopy(.wrongDevice, direction: 0, speedName: "").detail?.contains("on
       "wrong device explains compatibility")
 check(StatusCopy(.disabled, direction: 1, speedName: "Fast").headline == "Paused", "paused ignores direction")
 
+// Setup
+check(SetupState(canPostEvents: true, inputMonitoringDenied: false, pedalConnected: true).isComplete, "all steps done")
+check(!SetupState(canPostEvents: false, inputMonitoringDenied: false, pedalConnected: true).isComplete, "needs accessibility")
+check(!SetupState(canPostEvents: true, inputMonitoringDenied: true, pedalConnected: true).isComplete, "needs input monitoring")
+check(!SetupState(canPostEvents: true, inputMonitoringDenied: false, pedalConnected: false).isComplete, "needs pedal")
+check(SetupState.showAtLaunch(completedBefore: false) && !SetupState.showAtLaunch(completedBefore: true), "show until finished once")
+
 if failures == 0 {
     print("All tests passed")
 } else {

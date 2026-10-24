@@ -179,3 +179,16 @@ struct StatusCopy: Equatable {
         }
     }
 }
+
+/// What the setup window shows, and whether setup is finished.
+struct SetupState: Equatable {
+    var canPostEvents: Bool
+    var inputMonitoringDenied: Bool
+    var pedalConnected: Bool
+
+    var isComplete: Bool { canPostEvents && !inputMonitoringDenied && pedalConnected }
+
+    /// The window opens at launch until the user has finished setup once;
+    /// after that, problems surface in the menu and "Setup Guide…" reopens it.
+    static func showAtLaunch(completedBefore: Bool) -> Bool { !completedBefore }
+}
