@@ -10,22 +10,7 @@ import os
 
 let log = Logger(subsystem: "com.chuckconway.pedal-scroll", category: "hid")
 
-// MARK: - Configuration
-
-let elgatoVendorID: Int = 0x0FD9
-let pedalProductID: Int = 0x0086
-
-struct Speed {
-    let name: String
-    let delta: Int32
-    let interval: TimeInterval
-}
-
-let speeds: [Speed] = [
-    Speed(name: "Slow",   delta: 2, interval: 0.020),
-    Speed(name: "Medium", delta: 4, interval: 0.020),
-    Speed(name: "Fast",   delta: 8, interval: 0.015),
-]
+// MARK: - Configuration (device IDs and speeds live in PedalLogic.swift)
 
 let defaults = UserDefaults.standard
 let kSpeedIndexKey = "speedIndex"
@@ -59,6 +44,8 @@ var hidManager: IOHIDManager?
 var inputMonitoringDenied = false
 /// Accessibility grant, required for CGEvent posting. Refreshed by `refreshPermissions()`.
 var canPostEvents = CGPreflightPostEventAccess()
+/// Registry IDs of plugged-in Elgato devices that aren't the Pedal (never opened).
+var otherStreamDecks = Set<UInt64>()
 
 // MARK: - Scroll engine
 
@@ -193,13 +180,14 @@ func startHIDManager() {
     hidManager = manager
 
     let matching: [String: Any] = [
-        kIOHIDVendorIDKey: elgatoVendorID,
-        kIOHIDProductIDKey: pedalProductID,
+        kIOHIDVendorIDKey: PedalDevice.vendorID,
+        kIOHIDProductIDKey: PedalDevice.productID,
     ]
     IOHIDManagerSetDeviceMatching(manager, matching as CFDictionary)
     IOHIDManagerRegisterDeviceMatchingCallback(manager, deviceMatchingCallback, nil)
     IOHIDManagerRegisterDeviceRemovalCallback(manager, deviceRemovalCallback, nil)
-    IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+    // Common modes so the pedal keeps working while the status menu is open.
+    IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
 
     let result = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
     if result != kIOReturnSuccess {
@@ -211,7 +199,7 @@ func startHIDManager() {
 /// Tears down and recreates the HID manager, e.g. after Input Monitoring is granted.
 func restartHIDManager() {
     if let manager = hidManager {
-        IOHIDManagerUnscheduleFromRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+        IOHIDManagerUnscheduleFromRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
         IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
     }
     for buffer in pedalBuffers.values { buffer.deallocate() }
@@ -220,6 +208,57 @@ func restartHIDManager() {
     pedalTracker.reset()
     inputMonitoringDenied = false
     startHIDManager()
+}
+
+// MARK: - Other Stream Decks (only to explain "wrong device"; never opened)
+
+var otherDeviceNotifyPort: IONotificationPortRef?
+var otherDeviceAddedIterator: io_iterator_t = 0
+var otherDeviceRemovedIterator: io_iterator_t = 0
+
+/// Reads registry properties only, so it needs no permission and doesn't touch the device.
+func drainOtherDevices(_ iterator: io_iterator_t, added: Bool) {
+    var service = IOIteratorNext(iterator)
+    while service != 0 {
+        var entryID: UInt64 = 0
+        IORegistryEntryGetRegistryEntryID(service, &entryID)
+        if added {
+            let vendor = IORegistryEntryCreateCFProperty(service, kIOHIDVendorIDKey as CFString, kCFAllocatorDefault, 0)?
+                .takeRetainedValue() as? Int ?? 0
+            let product = IORegistryEntryCreateCFProperty(service, kIOHIDProductIDKey as CFString, kCFAllocatorDefault, 0)?
+                .takeRetainedValue() as? Int ?? 0
+            if PedalDevice.isOtherStreamDeck(vendorID: vendor, productID: product) {
+                otherStreamDecks.insert(entryID)
+            }
+        } else {
+            otherStreamDecks.remove(entryID)
+        }
+        IOObjectRelease(service)
+        service = IOIteratorNext(iterator)
+    }
+}
+
+func startOtherDeviceWatch() {
+    guard let port = IONotificationPortCreate(kIOMainPortDefault) else { return }
+    otherDeviceNotifyPort = port
+    CFRunLoopAddSource(CFRunLoopGetMain(), IONotificationPortGetRunLoopSource(port).takeUnretainedValue(), .commonModes)
+
+    func elgatoHIDDevices() -> CFDictionary {
+        let matching = IOServiceMatching(kIOHIDDeviceKey) as NSMutableDictionary
+        matching[kIOHIDVendorIDKey] = PedalDevice.vendorID
+        return matching
+    }
+    IOServiceAddMatchingNotification(port, kIOFirstMatchNotification, elgatoHIDDevices(), { _, iterator in
+        drainOtherDevices(iterator, added: true)
+        postConnectionChanged()
+    }, nil, &otherDeviceAddedIterator)
+    IOServiceAddMatchingNotification(port, kIOTerminatedNotification, elgatoHIDDevices(), { _, iterator in
+        drainOtherDevices(iterator, added: false)
+        postConnectionChanged()
+    }, nil, &otherDeviceRemovedIterator)
+    // Draining arms the notifications and picks up devices already plugged in.
+    drainOtherDevices(otherDeviceAddedIterator, added: true)
+    drainOtherDevices(otherDeviceRemovedIterator, added: false)
 }
 
 /// Re-reads TCC grants. Returns true if anything changed.
@@ -250,10 +289,15 @@ let repositoryURL = URL(string: "https://github.com/chuckconway/streamdeck-pedal
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
-    private var enabledItem: NSMenuItem!
-    private var loginItem: NSMenuItem!
-    private var statusInfoItem: NSMenuItem!
+    private let header = StatusHeaderView()
+    private let pedalMap = PedalMapView()
+    private let callout = PermissionCalloutView()
+    private let preview = SpeedPreviewView()
+    private var calloutItem: NSMenuItem!
     private var permissionItem: NSMenuItem!
+    private var permissionSeparator: NSMenuItem!
+    private var pauseItem: NSMenuItem!
+    private var loginItem: NSMenuItem!
     private var speedItems: [NSMenuItem] = []
     /// Polls TCC while a permission is missing so the menu bar icon updates without a click.
     private var permissionPoll: Timer?
@@ -261,6 +305,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
         startHIDManager()
+        startOtherDeviceWatch()
         log.info("Launch: canPostEvents=\(canPostEvents, privacy: .public) inputMonitoringDenied=\(inputMonitoringDenied, privacy: .public)")
         if !canPostEvents {
             // Shows the system Accessibility prompt once; later launches stay quiet.
@@ -270,9 +315,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                                name: .pedalConnectionChanged, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(updateAll),
                                                name: .pedalSpeedChanged, object: nil)
-        NotificationCenter.default.addObserver(self, selector: #selector(updateIcon),
+        NotificationCenter.default.addObserver(self, selector: #selector(updateLive),
                                                name: .pedalInputChanged, object: nil)
         updateAll()
+    }
+
+    private func viewItem(_ view: NSView) -> NSMenuItem {
+        let item = NSMenuItem()
+        item.view = view
+        return item
+    }
+
+    private func actionItem(_ title: String, _ action: Selector, key: String = "") -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+        item.target = self
+        return item
     }
 
     private func buildMenu() {
@@ -280,91 +337,133 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
 
-        statusInfoItem = NSMenuItem(title: "Pedal: …", action: nil, keyEquivalent: "")
-        statusInfoItem.isEnabled = false
-        menu.addItem(statusInfoItem)
+        menu.addItem(viewItem(header))
+        menu.addItem(viewItem(pedalMap))
 
-        permissionItem = NSMenuItem(title: "", action: #selector(grantPermission), keyEquivalent: "")
-        permissionItem.target = self
-        permissionItem.isHidden = true
+        permissionSeparator = .separator()
+        menu.addItem(permissionSeparator)
+        calloutItem = viewItem(callout)
+        menu.addItem(calloutItem)
+        permissionItem = actionItem("", #selector(grantPermission))
         menu.addItem(permissionItem)
         menu.addItem(.separator())
 
-        let speedHeader = NSMenuItem(title: "Speed", action: nil, keyEquivalent: "")
+        let speedHeader = NSMenuItem()
+        speedHeader.attributedTitle = sectionTitle("Speed", note: "middle pedal cycles")
         speedHeader.isEnabled = false
         menu.addItem(speedHeader)
+        menu.addItem(viewItem(preview))
         for (index, speed) in speeds.enumerated() {
-            let item = NSMenuItem(title: "  \(speed.name)", action: #selector(selectSpeed(_:)), keyEquivalent: "")
-            item.target = self
+            let item = actionItem(speed.name, #selector(selectSpeed(_:)))
             item.tag = index
+            item.attributedTitle = speedTitle(speed)
             speedItems.append(item)
             menu.addItem(item)
         }
         menu.addItem(.separator())
 
-        enabledItem = NSMenuItem(title: "Enabled", action: #selector(toggleEnabled), keyEquivalent: "")
-        enabledItem.target = self
-        menu.addItem(enabledItem)
-
-        loginItem = NSMenuItem(title: "Start at Login", action: #selector(toggleLogin), keyEquivalent: "")
-        loginItem.target = self
+        pauseItem = actionItem("Pause Scrolling", #selector(togglePause))
+        menu.addItem(pauseItem)
+        loginItem = actionItem("Start at Login", #selector(toggleLogin))
         menu.addItem(loginItem)
         menu.addItem(.separator())
 
-        let aboutItem = NSMenuItem(title: "About Pedal Scroll", action: #selector(showAbout), keyEquivalent: "")
-        aboutItem.target = self
-        menu.addItem(aboutItem)
-
-        let quitItem = NSMenuItem(title: "Quit Pedal Scroll", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        menu.addItem(quitItem)
+        menu.addItem(actionItem("About Pedal Scroll", #selector(showAbout)))
+        menu.addItem(NSMenuItem(title: "Quit Pedal Scroll", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
 
         statusItem.menu = menu
+    }
+
+    private func sectionTitle(_ title: String, note: String) -> NSAttributedString {
+        let font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        let result = NSMutableAttributedString(string: title, attributes: [
+            .font: font, .foregroundColor: NSColor.secondaryLabelColor,
+        ])
+        result.append(NSAttributedString(string: " · \(note)", attributes: [
+            .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor,
+        ]))
+        return result
+    }
+
+    /// "Medium            ~4.5 s per page", with the rate right-aligned and dimmed.
+    private func speedTitle(_ speed: Speed) -> NSAttributedString {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.tabStops = [NSTextTab(textAlignment: .right, location: menuContentWidth - 40)]
+        let font = NSFont.menuFont(ofSize: 0)
+        let result = NSMutableAttributedString(string: speed.name, attributes: [
+            .font: font, .paragraphStyle: paragraph,
+        ])
+        result.append(NSAttributedString(string: "\t\(speed.pageLabel)", attributes: [
+            .font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.secondaryLabelColor,
+            .paragraphStyle: paragraph,
+        ]))
+        return result
     }
 
     func menuWillOpen(_ menu: NSMenu) {
         refreshPermissions()
         updateAll()
+        preview.speedIndex = currentSpeedIndex
+        preview.start()
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        preview.stop()
+    }
+
+    /// Hovering a speed previews it; anything else shows the selected speed.
+    func menu(_ menu: NSMenu, willHighlight item: NSMenuItem?) {
+        if let item, speedItems.contains(item) {
+            preview.speedIndex = item.tag
+        } else {
+            preview.speedIndex = currentSpeedIndex
+        }
     }
 
     private var currentStatus: AppStatus {
         AppStatus(inputMonitoringDenied: inputMonitoringDenied,
                   pedalConnected: pedalConnected,
+                  otherStreamDeckConnected: !otherStreamDecks.isEmpty,
                   canPostEvents: canPostEvents,
                   enabled: enabled)
     }
 
-    @objc private func updateAll() {
-        let status = currentStatus
-        let dotColor: NSColor
-        let statusText = Self.statusText(status)
+    private static func dotColor(_ status: AppStatus) -> NSColor {
         switch status {
-        case .needsInputMonitoring, .needsAccessibility:
-            dotColor = .systemOrange
-        case .notConnected:
-            dotColor = .systemRed
-        case .disabled:
-            dotColor = .systemYellow
-        case .active:
-            dotColor = .systemGreen
+        case .needsInputMonitoring, .needsAccessibility: return .systemOrange
+        case .notConnected, .wrongDevice: return .systemRed
+        case .disabled: return .systemYellow
+        case .active: return .systemGreen
         }
-        statusInfoItem.attributedTitle = makeStatusTitle(dot: dotColor, text: statusText)
+    }
 
-        // Accessibility is needed whether or not a pedal is plugged in, so offer it regardless.
+    @objc private func updateAll() {
+        // Accessibility is needed whether or not a pedal is plugged in, so explain it regardless.
+        let missingPermission: (title: String, body: String, action: String)?
         if inputMonitoringDenied {
-            permissionItem.title = "Grant Input Monitoring…"
-            permissionItem.isHidden = false
+            missingPermission = ("Pedal Scroll needs Input Monitoring access",
+                                 "macOS won't let apps read the pedal until you allow it.",
+                                 "Open Input Monitoring Settings…")
         } else if !canPostEvents {
-            permissionItem.title = "Grant Accessibility…"
-            permissionItem.isHidden = false
+            missingPermission = ("Scrolling needs Accessibility access",
+                                 "macOS blocks scroll events from apps until you allow them.",
+                                 "Open Accessibility Settings…")
         } else {
-            permissionItem.isHidden = true
+            missingPermission = nil
         }
-        updatePermissionPoll(needed: !permissionItem.isHidden)
+        if let missingPermission {
+            callout.update(title: missingPermission.title, body: missingPermission.body)
+            permissionItem.title = missingPermission.action
+        }
+        for item in [permissionSeparator, calloutItem, permissionItem] {
+            item?.isHidden = missingPermission == nil
+        }
+        updatePermissionPoll(needed: missingPermission != nil)
 
         for (i, item) in speedItems.enumerated() {
             item.state = (i == currentSpeedIndex) ? .on : .off
         }
-        enabledItem.state = enabled ? .on : .off
+        pauseItem.state = enabled ? .off : .on
 
         switch SMAppService.mainApp.status {
         case .enabled:
@@ -378,28 +477,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             loginItem.state = .off
         }
 
-        updateIcon()
+        updateLive()
     }
 
-    private static func statusText(_ status: AppStatus) -> String {
-        switch status {
-        case .needsInputMonitoring: return "Needs Input Monitoring permission"
-        case .notConnected: return "Pedal not connected"
-        case .needsAccessibility: return "Needs Accessibility permission"
-        case .disabled: return "Pedal connected (disabled)"
-        case .active: return "Pedal connected"
-        }
-    }
-
-    /// Redraws the menu bar glyph: status, held pedals, and current speed.
-    @objc private func updateIcon() {
-        guard let button = statusItem.button else { return }
+    /// Everything that follows the pedal in real time: header, pedal map, menu bar glyph.
+    @objc private func updateLive() {
         let status = currentStatus
+        let speedName = speeds[currentSpeedIndex].name
+        let copy = StatusCopy(status, direction: pedalTracker.direction, speedName: speedName)
+        header.update(copy, dotColor: Self.dotColor(status))
+        pedalMap.state = pedalTracker.state
+        pedalMap.speedLevel = currentSpeedIndex + 1
+        pedalMap.connected = pedalConnected
+
+        guard let button = statusItem.button else { return }
         var icon = MenuBarIconState()
         switch status {
         case .needsInputMonitoring, .needsAccessibility:
             icon.kind = .needsPermission
-        case .notConnected:
+        case .notConnected, .wrongDevice:
             icon.kind = .notConnected
         case .disabled, .active:
             icon.kind = .active
@@ -408,11 +504,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         icon.middleHeld = pedalTracker.state.middle
         icon.speedLevel = currentSpeedIndex + 1
 
-        let statusText = Self.statusText(status)
         button.image = MenuBarIcon.image(icon)
-        button.image?.accessibilityDescription = "Pedal Scroll: \(statusText)"
+        button.image?.accessibilityDescription = "Pedal Scroll: \(copy.headline)"
         button.appearsDisabled = status == .disabled
-        button.toolTip = "Pedal Scroll — \(statusText), \(speeds[currentSpeedIndex].name) speed"
+        button.toolTip = "Pedal Scroll — \(copy.headline)"
     }
 
     private func updatePermissionPoll(needed: Bool) {
@@ -424,19 +519,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             permissionPoll?.invalidate()
             permissionPoll = nil
         }
-    }
-
-    private func makeStatusTitle(dot color: NSColor, text: String) -> NSAttributedString {
-        let result = NSMutableAttributedString()
-        result.append(NSAttributedString(string: "● ", attributes: [
-            .foregroundColor: color,
-            .font: NSFont.menuFont(ofSize: 0),
-        ]))
-        result.append(NSAttributedString(string: text, attributes: [
-            .foregroundColor: NSColor.labelColor,
-            .font: NSFont.menuFont(ofSize: 0),
-        ]))
-        return result
     }
 
     @objc private func grantPermission() {
@@ -465,7 +547,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateAll()
     }
 
-    @objc private func toggleEnabled() {
+    @objc private func togglePause() {
         setEnabled(!enabled)
         updateAll()
     }

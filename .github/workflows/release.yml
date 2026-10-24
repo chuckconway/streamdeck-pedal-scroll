@@ -1,0 +1,62 @@
+name: Release
+
+# Push a tag like v1.2.0 to publish a release.
+# Signing and notarization run when these repository secrets exist:
+#   DEVELOPER_ID_P12           base64 of the "Developer ID Application" .p12
+#   DEVELOPER_ID_P12_PASSWORD  password for the .p12
+#   SIGN_IDENTITY              e.g. "Developer ID Application: Name (TEAMID)"
+#   NOTARY_APPLE_ID, NOTARY_TEAM_ID, NOTARY_PASSWORD (app-specific password)
+# Without them the release is ad-hoc signed and marked as a pre-release.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    env:
+      DEVELOPER_ID_P12: ${{ secrets.DEVELOPER_ID_P12 }}
+      DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+      SIGN_IDENTITY: ${{ secrets.SIGN_IDENTITY }}
+      NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+      NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+      NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Test
+        run: app/test.sh
+
+      - name: Import signing certificate
+        if: env.DEVELOPER_ID_P12 != ''
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          echo "$DEVELOPER_ID_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+
+      - name: Package
+        run: app/package.sh
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          zip=$(ls app/build/PedalScroll-*.zip)
+          flags=(--generate-notes --title "Pedal Scroll ${GITHUB_REF_NAME#v}")
+          if [ -z "$NOTARY_PASSWORD" ]; then
+            flags+=(--prerelease --notes "Unsigned build: macOS will block it on first launch. See the README for how to open it.")
+          fi
+          gh release create "$GITHUB_REF_NAME" "$zip" "${flags[@]}"

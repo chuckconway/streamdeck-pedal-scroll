@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        # Apple Silicon and Intel, so both slices of the universal binary get launched.
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # build.sh reads the version tag and commit count
+
+      - name: Test
+        run: app/test.sh
+
+      - name: Build
+        run: app/build.sh
+
+      - name: Check universal binary
+        run: |
+          archs="$(lipo -archs "app/build/Pedal Scroll.app/Contents/MacOS/PedalScroll")"
+          echo "$archs"
+          [[ "$archs" == *arm64* && "$archs" == *x86_64* ]]
+
+      - name: Launch smoke test
+        run: |
+          "app/build/Pedal Scroll.app/Contents/MacOS/PedalScroll" &
+          pid=$!
+          sleep 5
+          kill -0 "$pid"
+          kill "$pid"

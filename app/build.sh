@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build Pedal Scroll.app — an unsigned macOS menu bar app.
+# Build Pedal Scroll.app — a universal (arm64 + x86_64) macOS menu bar app.
 #
 # Usage:
 #   ./build.sh          # builds into ./build/Pedal Scroll.app
@@ -7,6 +7,8 @@
 #
 # Version: VERSION env var, else the latest vX.Y.Z git tag, else Info.plist's value.
 # Build number: commit count on HEAD.
+# Signing: SIGN_IDENTITY="Developer ID Application: …" signs with hardened runtime;
+# otherwise the bundle is ad-hoc signed (fine for local use, not for distribution).
 
 set -euo pipefail
 
@@ -25,14 +27,20 @@ echo "→ Cleaning previous build"
 rm -rf "$BUILD_DIR"
 mkdir -p "$MACOS" "$RESOURCES"
 
-echo "→ Compiling Swift"
-swiftc main.swift PedalLogic.swift MenuBarIcon.swift \
-    -o "$MACOS/$EXECUTABLE_NAME" \
-    -framework Cocoa \
-    -framework IOKit \
-    -framework CoreGraphics \
-    -framework ServiceManagement \
-    -O
+MIN_MACOS="$(plutil -extract LSMinimumSystemVersion raw Info.plist)"
+for ARCH in arm64 x86_64; do
+    echo "→ Compiling Swift ($ARCH)"
+    swiftc *.swift \
+        -target "$ARCH-apple-macos$MIN_MACOS" \
+        -o "$BUILD_DIR/$EXECUTABLE_NAME-$ARCH" \
+        -framework Cocoa \
+        -framework IOKit \
+        -framework CoreGraphics \
+        -framework ServiceManagement \
+        -O
+done
+lipo -create "$BUILD_DIR/$EXECUTABLE_NAME-arm64" "$BUILD_DIR/$EXECUTABLE_NAME-x86_64" \
+    -output "$MACOS/$EXECUTABLE_NAME"
 
 echo "→ Rendering app icon"
 swiftc icon/AppIcon.swift -o "$BUILD_DIR/AppIcon"
@@ -49,6 +57,15 @@ fi
 BUILD_NUMBER="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
 plutil -replace CFBundleVersion -string "$BUILD_NUMBER" "$CONTENTS/Info.plist"
 echo "  version $(plutil -extract CFBundleShortVersionString raw "$CONTENTS/Info.plist") ($BUILD_NUMBER)"
+
+if [ -n "${SIGN_IDENTITY:-}" ]; then
+    echo "→ Signing with $SIGN_IDENTITY (hardened runtime)"
+    codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP_DIR"
+else
+    echo "→ Ad-hoc signing (set SIGN_IDENTITY to sign for distribution)"
+    codesign --force --sign - "$APP_DIR"
+fi
+codesign --verify --strict "$APP_DIR"
 
 echo "→ Built: $APP_DIR"
 
