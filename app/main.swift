@@ -134,14 +134,16 @@ let inputReportCallback: IOHIDReportCallback = { _, _, _, _, reportID, report, r
     }
     log.debug("Pedals L=\(state.left) M=\(state.middle) R=\(state.right)")
 
+    let previous = pedalTracker
     let middleTapped = pedalTracker.update(state)
     applyScrollDirection(pedalTracker.direction)
 
     if middleTapped {
         cycleSpeed()
-        DispatchQueue.main.async {
-            NotificationCenter.default.post(name: .pedalSpeedChanged, object: nil)
-        }
+        NotificationCenter.default.post(name: .pedalSpeedChanged, object: nil)
+    } else if pedalTracker.state != previous.state {
+        // Already on the main run loop; redraw the menu bar glyph immediately.
+        NotificationCenter.default.post(name: .pedalInputChanged, object: nil)
     }
 }
 
@@ -239,7 +241,10 @@ func refreshPermissions() -> Bool {
 extension Notification.Name {
     static let pedalConnectionChanged = Notification.Name("pedalConnectionChanged")
     static let pedalSpeedChanged = Notification.Name("pedalSpeedChanged")
+    static let pedalInputChanged = Notification.Name("pedalInputChanged")
 }
+
+let repositoryURL = URL(string: "https://github.com/chuckconway/streamdeck-pedal-scroll")!
 
 // MARK: - Menu bar UI
 
@@ -265,6 +270,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                                name: .pedalConnectionChanged, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(updateAll),
                                                name: .pedalSpeedChanged, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(updateIcon),
+                                               name: .pedalInputChanged, object: nil)
         updateAll()
     }
 
@@ -329,19 +336,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func updateAll() {
         let status = currentStatus
         let dotColor: NSColor
-        let statusText: String
-        let symbol: String
+        let statusText = Self.statusText(status)
         switch status {
-        case .needsInputMonitoring:
-            (dotColor, statusText, symbol) = (.systemOrange, "Needs Input Monitoring permission", "exclamationmark.triangle")
+        case .needsInputMonitoring, .needsAccessibility:
+            dotColor = .systemOrange
         case .notConnected:
-            (dotColor, statusText, symbol) = (.systemRed, "Pedal not connected", "arrow.up.arrow.down.circle")
-        case .needsAccessibility:
-            (dotColor, statusText, symbol) = (.systemOrange, "Needs Accessibility permission", "exclamationmark.triangle")
+            dotColor = .systemRed
         case .disabled:
-            (dotColor, statusText, symbol) = (.systemYellow, "Pedal connected (disabled)", "arrow.up.arrow.down.square")
+            dotColor = .systemYellow
         case .active:
-            (dotColor, statusText, symbol) = (.systemGreen, "Pedal connected", "arrow.up.arrow.down")
+            dotColor = .systemGreen
         }
         statusInfoItem.attributedTitle = makeStatusTitle(dot: dotColor, text: statusText)
 
@@ -374,11 +378,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             loginItem.state = .off
         }
 
-        if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Pedal Scroll: \(statusText)")
-            button.image?.isTemplate = true
-            button.toolTip = "Pedal Scroll — \(statusText)"
+        updateIcon()
+    }
+
+    private static func statusText(_ status: AppStatus) -> String {
+        switch status {
+        case .needsInputMonitoring: return "Needs Input Monitoring permission"
+        case .notConnected: return "Pedal not connected"
+        case .needsAccessibility: return "Needs Accessibility permission"
+        case .disabled: return "Pedal connected (disabled)"
+        case .active: return "Pedal connected"
         }
+    }
+
+    /// Redraws the menu bar glyph: status, held pedals, and current speed.
+    @objc private func updateIcon() {
+        guard let button = statusItem.button else { return }
+        let status = currentStatus
+        var icon = MenuBarIconState()
+        switch status {
+        case .needsInputMonitoring, .needsAccessibility:
+            icon.kind = .needsPermission
+        case .notConnected:
+            icon.kind = .notConnected
+        case .disabled, .active:
+            icon.kind = .active
+        }
+        icon.direction = pedalTracker.direction
+        icon.middleHeld = pedalTracker.state.middle
+        icon.speedLevel = currentSpeedIndex + 1
+
+        let statusText = Self.statusText(status)
+        button.image = MenuBarIcon.image(icon)
+        button.image?.accessibilityDescription = "Pedal Scroll: \(statusText)"
+        button.appearsDisabled = status == .disabled
+        button.toolTip = "Pedal Scroll — \(statusText), \(speeds[currentSpeedIndex].name) speed"
     }
 
     private func updatePermissionPoll(needed: Bool) {
@@ -467,10 +501,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func showAbout() {
-        let alert = NSAlert()
-        alert.messageText = "Pedal Scroll"
-        alert.informativeText = "Use your Elgato Stream Deck Pedal to scroll any application.\n\nLeft pedal scrolls up, right pedal scrolls down, middle pedal cycles speed.\n\nReads the pedal directly via USB HID — no Stream Deck app or Hammerspoon required."
-        alert.runModal()
+        let body = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        let plain: [NSAttributedString.Key: Any] = [
+            .font: body, .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph,
+        ]
+        let credits = NSMutableAttributedString(
+            string: "Scroll any app with an Elgato Stream Deck Pedal.\n"
+                + "Left scrolls up, right scrolls down, middle cycles speed.\n\n",
+            attributes: plain)
+        var link = plain
+        link[.link] = repositoryURL
+        credits.append(NSAttributedString(string: "github.com/chuckconway/streamdeck-pedal-scroll", attributes: link))
+        var note = plain
+        note[.foregroundColor] = NSColor.secondaryLabelColor
+        credits.append(NSAttributedString(
+            string: "\n\nFree and open source (MIT). Not affiliated with Elgato or Corsair.",
+            attributes: note))
+
+        // Menu bar apps aren't active by default; without this the panel opens behind other windows.
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.orderFrontStandardAboutPanel(options: [.credits: credits])
     }
 }
 
