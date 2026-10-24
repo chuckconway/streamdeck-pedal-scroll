@@ -200,11 +200,14 @@ final class SpeedPreviewView: NSView {
     private var timer: Timer?
     private var lastTick: TimeInterval = 0
 
+    /// The preview's speed is tuned to this height; keep them together.
+    private static let boxHeight: CGFloat = 88
+
     override var isFlipped: Bool { true }
 
     init() {
         super.init(frame: NSRect(x: 0, y: 0, width: menuContentWidth, height: 98))
-        let box = NSRect(x: inset, y: 2, width: menuContentWidth - inset * 2, height: 88)
+        let box = NSRect(x: inset, y: 2, width: menuContentWidth - inset * 2, height: Self.boxHeight)
         let background = NSView(frame: box)
         background.wantsLayer = true
         background.layer?.cornerRadius = 8
@@ -217,7 +220,8 @@ final class SpeedPreviewView: NSView {
         caption.frame = NSRect(x: box.minX + 10, y: box.minY + 18, width: column - 16, height: 14)
         name.frame = NSRect(x: box.minX + 10, y: box.minY + 34, width: column - 16, height: 18)
         rate.frame = NSRect(x: box.minX + 10, y: box.minY + 54, width: column - 16, height: 14)
-        text.frame = NSRect(x: box.minX + column, y: box.minY + 1, width: box.width - column - 1, height: box.height - 2)
+        // Inset from the box's border so text never draws over it.
+        text.frame = NSRect(x: box.minX + column, y: box.minY + 4, width: box.width - column - 4, height: box.height - 8)
         [caption, name, rate, text].forEach(addSubview)
 
         let divider = NSView(frame: NSRect(x: box.minX + column - 1, y: box.minY, width: 1, height: box.height))
@@ -236,7 +240,7 @@ final class SpeedPreviewView: NSView {
         let speed = speeds[speedIndex]
         name.stringValue = speed.name
         rate.stringValue = speed.pageLabel
-        text.pointsPerSecond = speed.previewPointsPerSecond(height: Double(text.bounds.height))
+        text.pointsPerSecond = speed.previewPointsPerSecond(height: Double(Self.boxHeight))
         setAccessibilityLabel("Speed preview: \(speed.name), \(speed.pageLabel)")
     }
 
@@ -293,6 +297,28 @@ private final class PreviewTextView: NSView {
 
     override var isFlipped: Bool { true }
 
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        // Soft fade at the top and bottom so lines ease in and out instead of being cut.
+        wantsLayer = true
+        let fade = CAGradientLayer()
+        fade.colors = [NSColor.clear.cgColor, NSColor.black.cgColor, NSColor.black.cgColor, NSColor.clear.cgColor]
+        fade.locations = [0, 0.18, 0.82, 1]
+        layer?.mask = fade
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override func layout() {
+        super.layout()
+        layer?.mask?.frame = bounds
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        layer?.mask?.frame = bounds
+    }
+
     func advance(by seconds: TimeInterval) {
         let period = lineHeight * CGFloat(Self.lines.count)
         offset = (offset + CGFloat(pointsPerSecond * seconds)).truncatingRemainder(dividingBy: period)
@@ -300,6 +326,9 @@ private final class PreviewTextView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        // Since macOS 14 views don't clip to bounds by default; lines entering and
+        // leaving would otherwise draw over the box's border.
+        NSBezierPath(rect: bounds).addClip()
         let attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 11),
             .foregroundColor: NSColor.secondaryLabelColor,
