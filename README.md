@@ -8,6 +8,12 @@ A tiny macOS menu bar app that lets you scroll any application with an Elgato St
 
 Releasing a pedal stops the scroll instantly. Works in any app — browsers, PDF viewers, code editors, anything that accepts mouse-wheel input.
 
+## Compatibility
+
+Pedal Scroll works **only with the Elgato Stream Deck Pedal** (USB vendor `0x0FD9`, product `0x0086`). It ignores every other device, including other Stream Deck models (MK.2, XL, Mini, +, Neo) and Elgato's cameras, mics and capture cards. If another Stream Deck is plugged in but no Pedal, the menu says so.
+
+Pedal Scroll is an independent project, not affiliated with or endorsed by Elgato or Corsair. "Elgato" and "Stream Deck" are trademarks of Corsair.
+
 ## How it works
 
 A single ~300-line Swift app reads the Stream Deck Pedal directly via macOS's IOKit HID framework and emits native scroll-wheel events through CoreGraphics.
