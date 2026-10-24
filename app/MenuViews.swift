@@ -188,8 +188,8 @@ final class PermissionCalloutView: NSView {
 
 // MARK: - Speed preview
 
-/// Text scrolling at a speed, scaled so each line stays in view as long as it
-/// would in a full window, so the speeds can be compared before picking one.
+/// Text scrolling at a speed (scaled for the small frame; see
+/// `Speed.previewPointsPerSecond`), so the speeds can be compared before picking one.
 final class SpeedPreviewView: NSView {
     var speedIndex = 1 { didSet { updateLabels() } }
 

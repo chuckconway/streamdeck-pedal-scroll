@@ -51,12 +51,13 @@ struct Speed {
         return "~\(text) s per page"
     }
 
-    /// Rate for a preview `height` points tall, scaled so text stays on screen as
-    /// long as it would in a full window. At the real rate a small preview looks
-    /// far faster than actual scrolling (a line crosses 88 pt in under 0.5 s at
-    /// Medium, vs 4.5 s in a window).
+    /// Rate for a preview `height` points tall. Motion looks faster in a small
+    /// frame, so the real rate looks too fast in the menu's preview, while fully
+    /// page-scaling it (a line crossing the box as slowly as a whole window) looks
+    /// too slow. Scaling by the square root of the size ratio sits between the two
+    /// and was picked by feel; relative speeds are unchanged.
     func previewPointsPerSecond(height: Double) -> Double {
-        height / secondsPerPage
+        pointsPerSecond * (height / Self.pageHeight).squareRoot()
     }
 }
 
