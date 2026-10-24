@@ -30,7 +30,7 @@ mkdir -p "$MACOS" "$RESOURCES"
 MIN_MACOS="$(plutil -extract LSMinimumSystemVersion raw Info.plist)"
 for ARCH in arm64 x86_64; do
     echo "→ Compiling Swift ($ARCH)"
-    swiftc main.swift PedalLogic.swift MenuBarIcon.swift \
+    swiftc *.swift \
         -target "$ARCH-apple-macos$MIN_MACOS" \
         -o "$BUILD_DIR/$EXECUTABLE_NAME-$ARCH" \
         -framework Cocoa \

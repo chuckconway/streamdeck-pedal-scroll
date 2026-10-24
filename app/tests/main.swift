@@ -80,6 +80,29 @@ check(status(post: false, on: false) == .needsAccessibility, "accessibility outr
 check(status(conn: false, post: false) == .notConnected, "not connected outranks accessibility")
 check(status(im: true, conn: false) == .needsInputMonitoring, "input monitoring outranks everything")
 
+check(AppStatus(inputMonitoringDenied: false, pedalConnected: false, otherStreamDeckConnected: true,
+                canPostEvents: true, enabled: true) == .wrongDevice, "other Stream Deck, no pedal -> wrongDevice")
+check(AppStatus(inputMonitoringDenied: false, pedalConnected: true, otherStreamDeckConnected: true,
+                canPostEvents: true, enabled: true) == .active, "pedal plus other Stream Deck -> active")
+
+// Device filter
+check(!PedalDevice.isOtherStreamDeck(vendorID: 0x0FD9, productID: 0x0086), "the Pedal is not 'other'")
+check(PedalDevice.isOtherStreamDeck(vendorID: 0x0FD9, productID: 0x0080), "Stream Deck MK.2 is 'other'")
+check(!PedalDevice.isOtherStreamDeck(vendorID: 0x05AC, productID: 0x0086), "non-Elgato devices are ignored")
+check(!PedalDevice.isOtherStreamDeck(vendorID: 0x0FD9, productID: 0x0066), "Cam Link 4K is not a Stream Deck")
+
+// Speeds
+check(speeds.map(\.pointsPerSecond).map { Int($0.rounded()) } == [100, 200, 533], "real rates in pt/s")
+check(speeds.map(\.pageLabel) == ["~9 s per page", "~4.5 s per page", "~1.7 s per page"], "page labels")
+
+// Status copy
+check(StatusCopy(.active, direction: 0, speedName: "Medium").headline == "Ready · Medium speed", "ready copy")
+check(StatusCopy(.active, direction: 1, speedName: "Fast").headline == "Scrolling up · Fast", "scrolling up copy")
+check(StatusCopy(.active, direction: -1, speedName: "Slow").headline == "Scrolling down · Slow", "scrolling down copy")
+check(StatusCopy(.wrongDevice, direction: 0, speedName: "").detail?.contains("only with the Elgato Stream Deck Pedal") == true,
+      "wrong device explains compatibility")
+check(StatusCopy(.disabled, direction: 1, speedName: "Fast").headline == "Paused", "paused ignores direction")
+
 if failures == 0 {
     print("All tests passed")
 } else {

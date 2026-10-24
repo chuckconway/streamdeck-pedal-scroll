@@ -1,5 +1,57 @@
 // Pure pedal logic — no IOKit, no AppKit — so it can be unit-tested.
 
+import Foundation
+
+/// The only device Pedal Scroll drives: the Elgato Stream Deck Pedal.
+enum PedalDevice {
+    static let vendorID = 0x0FD9   // Elgato
+    static let productID = 0x0086  // Stream Deck Pedal
+
+    /// Other Stream Deck models. Elgato also makes webcams, mics and capture cards
+    /// (e.g. Cam Link 4K, 0x0066) under the same vendor ID, so "any other Elgato
+    /// device" would be wrong. IDs as listed by python-elgato-streamdeck.
+    static let otherStreamDeckProductIDs: Set<Int> = [
+        0x0060, // Stream Deck (original)
+        0x0063, // Stream Deck Mini
+        0x006C, // Stream Deck XL
+        0x006D, // Stream Deck (original, v2)
+        0x0080, // Stream Deck MK.2
+        0x0084, // Stream Deck +
+        0x008F, // Stream Deck XL (v2)
+        0x0090, // Stream Deck Mini (MK.2)
+        0x009A, // Stream Deck Neo
+    ]
+
+    /// A Stream Deck that isn't the Pedal. Only used to explain why nothing
+    /// happens; such devices are never opened.
+    static func isOtherStreamDeck(vendorID: Int, productID: Int) -> Bool {
+        vendorID == Self.vendorID && otherStreamDeckProductIDs.contains(productID)
+    }
+}
+
+struct Speed {
+    let name: String
+    /// Points per scroll event.
+    let delta: Int32
+    /// Seconds between scroll events.
+    let interval: TimeInterval
+
+    var pointsPerSecond: Double { Double(delta) / interval }
+
+    /// Plain-language rate, assuming a ~900 pt tall window: "~4.5 s per page".
+    var pageLabel: String {
+        let seconds = (900 / pointsPerSecond * 10).rounded() / 10
+        let text = seconds == seconds.rounded() ? String(Int(seconds)) : String(seconds)
+        return "~\(text) s per page"
+    }
+}
+
+let speeds: [Speed] = [
+    Speed(name: "Slow",   delta: 2, interval: 0.020),
+    Speed(name: "Medium", delta: 4, interval: 0.020),
+    Speed(name: "Fast",   delta: 8, interval: 0.015),
+]
+
 struct PedalState: Equatable {
     var left = false
     var middle = false
@@ -62,22 +114,53 @@ struct PedalTracker {
 /// What the menu bar shows, highest-priority problem first.
 enum AppStatus: Equatable {
     case needsInputMonitoring  // Can't read HID, so connection state is unknown.
+    case wrongDevice           // No Pedal, but another Stream Deck is plugged in.
     case notConnected
     case needsAccessibility    // Pedal reads fine, but scroll events would be dropped.
     case disabled
     case active
 
-    init(inputMonitoringDenied: Bool, pedalConnected: Bool, canPostEvents: Bool, enabled: Bool) {
+    init(inputMonitoringDenied: Bool, pedalConnected: Bool, otherStreamDeckConnected: Bool = false,
+         canPostEvents: Bool, enabled: Bool) {
         if inputMonitoringDenied {
             self = .needsInputMonitoring
         } else if !pedalConnected {
-            self = .notConnected
+            self = otherStreamDeckConnected ? .wrongDevice : .notConnected
         } else if !canPostEvents {
             self = .needsAccessibility
         } else if !enabled {
             self = .disabled
         } else {
             self = .active
+        }
+    }
+}
+
+/// The menu's status line, plus an optional explanation under it.
+struct StatusCopy: Equatable {
+    var headline: String
+    var detail: String?
+
+    init(_ status: AppStatus, direction: Int32, speedName: String) {
+        switch status {
+        case .needsInputMonitoring:
+            headline = "Needs Input Monitoring access"
+        case .wrongDevice:
+            headline = "Stream Deck Pedal not found"
+            detail = "Found a Stream Deck, but Pedal Scroll works only with the Elgato Stream Deck Pedal."
+        case .notConnected:
+            headline = "No Stream Deck Pedal found"
+            detail = "Plug in your Elgato Stream Deck Pedal."
+        case .needsAccessibility:
+            headline = "Needs Accessibility access"
+        case .disabled:
+            headline = "Paused"
+        case .active:
+            switch direction {
+            case 1: headline = "Scrolling up · \(speedName)"
+            case -1: headline = "Scrolling down · \(speedName)"
+            default: headline = "Ready · \(speedName) speed"
+            }
         }
     }
 }
