@@ -188,8 +188,8 @@ final class PermissionCalloutView: NSView {
 
 // MARK: - Speed preview
 
-/// Text scrolling at a speed's real rate (points per second, same units as the
-/// scroll events), so the speeds can be compared before picking one.
+/// Text scrolling at a speed, scaled so each line stays in view as long as it
+/// would in a full window, so the speeds can be compared before picking one.
 final class SpeedPreviewView: NSView {
     var speedIndex = 1 { didSet { updateLabels() } }
 
@@ -236,7 +236,7 @@ final class SpeedPreviewView: NSView {
         let speed = speeds[speedIndex]
         name.stringValue = speed.name
         rate.stringValue = speed.pageLabel
-        text.pointsPerSecond = speed.pointsPerSecond
+        text.pointsPerSecond = speed.previewPointsPerSecond(height: Double(text.bounds.height))
         setAccessibilityLabel("Speed preview: \(speed.name), \(speed.pageLabel)")
     }
 

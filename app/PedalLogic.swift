@@ -36,13 +36,27 @@ struct Speed {
     /// Seconds between scroll events.
     let interval: TimeInterval
 
+    /// A typical window's visible height, used to describe speeds in "pages".
+    static let pageHeight: Double = 900
+
     var pointsPerSecond: Double { Double(delta) / interval }
 
-    /// Plain-language rate, assuming a ~900 pt tall window: "~4.5 s per page".
+    /// Seconds for content to cross a typical window.
+    var secondsPerPage: Double { Self.pageHeight / pointsPerSecond }
+
+    /// Plain-language rate: "~4.5 s per page".
     var pageLabel: String {
-        let seconds = (900 / pointsPerSecond * 10).rounded() / 10
+        let seconds = (secondsPerPage * 10).rounded() / 10
         let text = seconds == seconds.rounded() ? String(Int(seconds)) : String(seconds)
         return "~\(text) s per page"
+    }
+
+    /// Rate for a preview `height` points tall, scaled so text stays on screen as
+    /// long as it would in a full window. At the real rate a small preview looks
+    /// far faster than actual scrolling (a line crosses 88 pt in under 0.5 s at
+    /// Medium, vs 4.5 s in a window).
+    func previewPointsPerSecond(height: Double) -> Double {
+        height / secondsPerPage
     }
 }
 

@@ -94,6 +94,13 @@ check(!PedalDevice.isOtherStreamDeck(vendorID: 0x0FD9, productID: 0x0066), "Cam 
 // Speeds
 check(speeds.map(\.pointsPerSecond).map { Int($0.rounded()) } == [100, 200, 533], "real rates in pt/s")
 check(speeds.map(\.pageLabel) == ["~9 s per page", "~4.5 s per page", "~1.7 s per page"], "page labels")
+for speed in speeds {
+    // Text crosses the preview in the same time it crosses a full window.
+    let crossing = 88 / speed.previewPointsPerSecond(height: 88)
+    check(abs(crossing - speed.secondsPerPage) < 0.001, "\(speed.name) preview matches page time")
+}
+check(abs(speeds[2].previewPointsPerSecond(height: 88) / speeds[0].previewPointsPerSecond(height: 88) - 5.33) < 0.01,
+      "preview keeps relative speeds")
 
 // Status copy
 check(StatusCopy(.active, direction: 0, speedName: "Medium").headline == "Ready · Medium speed", "ready copy")
