@@ -15,6 +15,8 @@ let log = Logger(subsystem: "com.chuckconway.pedal-scroll", category: "hid")
 let defaults = UserDefaults.standard
 let kSpeedIndexKey = "speedIndex"
 let kEnabledKey = "enabled"
+let kShowOverlayKey = "showSpeedOverlay"
+let kSetupCompletedKey = "setupCompleted"
 
 // MARK: - Globals (main thread only)
 
@@ -301,20 +303,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var speedItems: [NSMenuItem] = []
     /// Polls TCC while a permission is missing so the menu bar icon updates without a click.
     private var permissionPoll: Timer?
+    private var overlayItem: NSMenuItem!
+    private let overlay = SpeedOverlay()
+    private var setup: SetupWindowController?
+
+    /// On by default: with notifications off or the menu bar hidden, it's the only speed feedback.
+    private var showOverlay: Bool {
+        get { defaults.object(forKey: kShowOverlayKey) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: kShowOverlayKey) }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
         startHIDManager()
         startOtherDeviceWatch()
         log.info("Launch: canPostEvents=\(canPostEvents, privacy: .public) inputMonitoringDenied=\(inputMonitoringDenied, privacy: .public)")
-        if !canPostEvents {
+        if SetupState.showAtLaunch(completedBefore: defaults.bool(forKey: kSetupCompletedKey)) {
+            // The setup window asks for Accessibility itself, one step at a time.
+            showSetup()
+        } else if !canPostEvents {
             // Shows the system Accessibility prompt once; later launches stay quiet.
             CGRequestPostEventAccess()
         }
+        NotificationCenter.default.addObserver(self, selector: #selector(speedCycled),
+                                               name: .pedalSpeedChanged, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(updateAll),
                                                name: .pedalConnectionChanged, object: nil)
-        NotificationCenter.default.addObserver(self, selector: #selector(updateAll),
-                                               name: .pedalSpeedChanged, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(updateLive),
                                                name: .pedalInputChanged, object: nil)
         updateAll()
@@ -366,8 +380,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(pauseItem)
         loginItem = actionItem("Start at Login", #selector(toggleLogin))
         menu.addItem(loginItem)
+        overlayItem = actionItem("Show Speed Overlay", #selector(toggleOverlay))
+        menu.addItem(overlayItem)
         menu.addItem(.separator())
 
+        menu.addItem(actionItem("Setup Guide…", #selector(showSetup)))
         menu.addItem(actionItem("About Pedal Scroll", #selector(showAbout)))
         menu.addItem(NSMenuItem(title: "Quit Pedal Scroll", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
 
@@ -458,12 +475,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for item in [permissionSeparator, calloutItem, permissionItem] {
             item?.isHidden = missingPermission == nil
         }
-        updatePermissionPoll(needed: missingPermission != nil)
+        // Keep polling while the setup window is open so its steps tick off live.
+        updatePermissionPoll(needed: missingPermission != nil || setup?.window?.isVisible == true)
 
         for (i, item) in speedItems.enumerated() {
             item.state = (i == currentSpeedIndex) ? .on : .off
         }
         pauseItem.state = enabled ? .off : .on
+        overlayItem.state = showOverlay ? .on : .off
+        setup?.update(setupState, wrongDevice: !pedalConnected && !otherStreamDecks.isEmpty)
 
         switch SMAppService.mainApp.status {
         case .enabled:
@@ -523,16 +543,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func grantPermission() {
         if inputMonitoringDenied {
-            // Prompts if undecided; otherwise the user has to flip the switch in Settings.
-            if !IOHIDRequestAccess(kIOHIDRequestTypeListenEvent) {
-                openPrivacyPane("Privacy_ListenEvent")
-            }
+            grantInputMonitoring()
         } else if !canPostEvents {
-            if !CGRequestPostEventAccess() {
-                openPrivacyPane("Privacy_Accessibility")
-            }
+            grantAccessibility()
+        }
+    }
+
+    private func grantAccessibility() {
+        // Prompts if undecided; otherwise the user has to flip the switch in Settings.
+        if !CGRequestPostEventAccess() {
+            openPrivacyPane("Privacy_Accessibility")
         }
         refreshPermissions()
+        updateAll()
+    }
+
+    private func grantInputMonitoring() {
+        if !IOHIDRequestAccess(kIOHIDRequestTypeListenEvent) {
+            openPrivacyPane("Privacy_ListenEvent")
+        }
+        refreshPermissions()
+        updateAll()
+    }
+
+    private var setupState: SetupState {
+        SetupState(canPostEvents: canPostEvents, inputMonitoringDenied: inputMonitoringDenied,
+                   pedalConnected: pedalConnected)
+    }
+
+    @objc private func showSetup() {
+        if setup == nil {
+            let controller = SetupWindowController()
+            controller.onGrantAccessibility = { [weak self] in self?.grantAccessibility() }
+            controller.onGrantInputMonitoring = { [weak self] in self?.grantInputMonitoring() }
+            controller.onClose = { [weak self] completed, startAtLogin in
+                if completed { defaults.set(true, forKey: kSetupCompletedKey) }
+                self?.setLoginItem(startAtLogin)
+                self?.updateAll()
+            }
+            setup = controller
+        }
+        refreshPermissions()
+        setup?.update(setupState, wrongDevice: !pedalConnected && !otherStreamDecks.isEmpty)
+        setup?.show()
+        updateAll()
+    }
+
+    @objc private func speedCycled() {
+        updateAll()
+        if showOverlay { overlay.show(speedIndex: currentSpeedIndex) }
+    }
+
+    @objc private func toggleOverlay() {
+        showOverlay.toggle()
         updateAll()
     }
 
@@ -553,24 +616,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func toggleLogin() {
+        switch SMAppService.mainApp.status {
+        case .enabled:
+            setLoginItem(false)
+        case .requiresApproval:
+            SMAppService.openSystemSettingsLoginItems()
+        default:
+            setLoginItem(true)
+        }
+        updateAll()
+    }
+
+    private func setLoginItem(_ on: Bool) {
         let service = SMAppService.mainApp
         do {
-            switch service.status {
-            case .enabled:
-                try service.unregister()
-            case .requiresApproval:
-                SMAppService.openSystemSettingsLoginItems()
-            default:
+            if on, service.status != .enabled {
                 try service.register()
                 if service.status == .requiresApproval {
                     SMAppService.openSystemSettingsLoginItems()
                 }
+            } else if !on, service.status == .enabled {
+                try service.unregister()
             }
         } catch {
-            log.error("Login item toggle failed: \(error.localizedDescription, privacy: .public)")
+            log.error("Login item change failed: \(error.localizedDescription, privacy: .public)")
             showError("Couldn't change Start at Login", detail: error.localizedDescription)
         }
-        updateAll()
     }
 
     private func showError(_ message: String, detail: String) {

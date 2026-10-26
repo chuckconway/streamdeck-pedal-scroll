@@ -47,6 +47,9 @@ swiftc icon/AppIcon.swift -o "$BUILD_DIR/AppIcon"
 "$BUILD_DIR/AppIcon" "$BUILD_DIR/AppIcon.iconset"
 iconutil -c icns "$BUILD_DIR/AppIcon.iconset" -o "$RESOURCES/AppIcon.icns"
 
+# MIT requires the notice to travel with every copy.
+cp ../LICENSE "$RESOURCES/LICENSE"
+
 echo "→ Writing Info.plist"
 cp Info.plist "$CONTENTS/Info.plist"
 TAG="$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)"
