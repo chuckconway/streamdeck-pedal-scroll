@@ -192,6 +192,12 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate {
         return line
     }
 
+    /// The login checkbox; set before `show()` so reopening reflects the current setting.
+    var startAtLogin: Bool {
+        get { loginCheckbox.state == .on }
+        set { loginCheckbox.state = newValue ? .on : .off }
+    }
+
     func show() {
         // Size the window to its content (rows grow when their text wraps).
         if let window, let content = window.contentView {
@@ -233,6 +239,6 @@ final class SetupWindowController: NSWindowController, NSWindowDelegate {
     @objc private func finish() { window?.close() }
 
     func windowWillClose(_ notification: Notification) {
-        onClose?(complete, loginCheckbox.state == .on)
+        onClose?(complete, startAtLogin)
     }
 }

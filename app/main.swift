@@ -584,6 +584,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             setup = controller
         }
         refreshPermissions()
+        // First run defaults to on; afterwards mirror the real setting so closing never flips it.
+        if defaults.bool(forKey: kSetupCompletedKey) {
+            let status = SMAppService.mainApp.status
+            setup?.startAtLogin = status == .enabled || status == .requiresApproval
+        }
         setup?.update(setupState, wrongDevice: !pedalConnected && !otherStreamDecks.isEmpty)
         setup?.show()
         updateAll()
