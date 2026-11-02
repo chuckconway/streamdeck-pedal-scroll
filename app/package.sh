@@ -8,6 +8,8 @@
 #   NOTARY_APPLE_ID   Apple ID email
 #   NOTARY_TEAM_ID    10-character team ID
 #   NOTARY_PASSWORD   app-specific password for the Apple ID
+# or, instead of the three NOTARY_* values above:
+#   NOTARY_PROFILE    a keychain profile saved with `xcrun notarytool store-credentials`
 # Without them the zip is ad-hoc signed and Gatekeeper will block it on download.
 
 set -euo pipefail
@@ -27,13 +29,16 @@ zip_app() {
 
 zip_app
 
-if [ -n "${SIGN_IDENTITY:-}" ] && [ -n "${NOTARY_APPLE_ID:-}" ] && [ -n "${NOTARY_TEAM_ID:-}" ] && [ -n "${NOTARY_PASSWORD:-}" ]; then
+NOTARY_AUTH=()
+if [ -n "${NOTARY_PROFILE:-}" ]; then
+    NOTARY_AUTH=(--keychain-profile "$NOTARY_PROFILE")
+elif [ -n "${NOTARY_APPLE_ID:-}" ] && [ -n "${NOTARY_TEAM_ID:-}" ] && [ -n "${NOTARY_PASSWORD:-}" ]; then
+    NOTARY_AUTH=(--apple-id "$NOTARY_APPLE_ID" --team-id "$NOTARY_TEAM_ID" --password "$NOTARY_PASSWORD")
+fi
+
+if [ -n "${SIGN_IDENTITY:-}" ] && [ ${#NOTARY_AUTH[@]} -gt 0 ]; then
     echo "→ Notarizing"
-    xcrun notarytool submit "$ZIP" \
-        --apple-id "$NOTARY_APPLE_ID" \
-        --team-id "$NOTARY_TEAM_ID" \
-        --password "$NOTARY_PASSWORD" \
-        --wait
+    xcrun notarytool submit "$ZIP" "${NOTARY_AUTH[@]}" --wait
     echo "→ Stapling"
     xcrun stapler staple "$APP_DIR"
     # Re-zip so the download carries the stapled ticket.
